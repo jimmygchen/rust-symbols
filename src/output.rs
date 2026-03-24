@@ -55,16 +55,15 @@ pub fn generate_symbols_idx(symbols: &[Symbol], output_dir: &Path) -> std::io::R
             ts,
             crate_symbols.len()
         )?;
-        writeln!(f, "# name|kind|path:line|signature")?;
+        writeln!(f, "# name|kind|path|signature")?;
 
         for s in crate_symbols {
             writeln!(
                 f,
-                "{}|{}|{}:{}|{}",
+                "{}|{}|{}|{}",
                 s.name,
                 s.kind.as_str(),
                 s.path,
-                s.line,
                 s.signature
             )?;
         }
@@ -79,7 +78,7 @@ pub fn generate_symbols_idx(symbols: &[Symbol], output_dir: &Path) -> std::io::R
         ts,
         symbols.len()
     )?;
-    writeln!(f, "# name|kind|path:line|signature")?;
+    writeln!(f, "# name|kind|path|signature")?;
     writeln!(
         f,
         "# NOTE: Use grep on this file, do NOT read it fully. Per-crate splits in symbols/"
@@ -88,11 +87,10 @@ pub fn generate_symbols_idx(symbols: &[Symbol], output_dir: &Path) -> std::io::R
     for s in symbols {
         writeln!(
             f,
-            "{}|{}|{}:{}|{}",
+            "{}|{}|{}|{}",
             s.name,
             s.kind.as_str(),
             s.path,
-            s.line,
             s.signature
         )?;
     }

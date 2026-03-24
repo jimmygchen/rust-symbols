@@ -9,6 +9,7 @@ Generates a compact, grep-friendly code index for Rust workspaces. Designed for 
 ```bash
 cargo install --path .
 rust-index /path/to/project --skip-statics
+# Commit .ai/index/ to your repo — it stays valid until you add/remove/rename public symbols.
 ```
 
 **2. Add to your `CLAUDE.md`** so the agent knows how to use it:
@@ -25,7 +26,7 @@ A pre-built index of all public symbols is available in `.ai/index/`.
 - Find which crate owns something: `grep "my_crate" .ai/index/crates.txt`
 - Browse a crate's symbols: `grep "." .ai/index/symbols/my_crate.txt`
 
-Each line returns: `name|kind|path:line|signature` — go directly to the file and line.
+Each line returns: `name|kind|path|signature` — grep the source file for the signature to find the exact line.
 
 **Rules:**
 - Always use anchored grep patterns (`^TypeName`) to avoid broad matches
@@ -33,7 +34,7 @@ Each line returns: `name|kind|path:line|signature` — go directly to the file a
 - After finding a symbol, read the actual source file for context.
 ```
 
-**3. Auto-regenerate after builds** by adding to `.claude/settings.json`:
+**3. (Optional) Auto-regenerate after builds** with a Claude Code hook in `.claude/settings.json`:
 
 ```json
 {
@@ -53,9 +54,11 @@ Each line returns: `name|kind|path:line|signature` — go directly to the file a
 }
 ```
 
+The index contains no line numbers, so it only goes stale when public symbols are added, removed, or renamed. For most workflows, regenerating occasionally or after major refactors is sufficient.
+
 ## Output
 
-- **`symbols.txt`** — one line per public symbol: `name|kind|path:line|signature`
+- **`symbols.txt`** — one line per public symbol: `name|kind|path|signature`
 - **`symbols/<crate>.txt`** — same, split per crate
 - **`crates.txt`** — workspace crates: `crate|path|internal_deps`
 - **`modules.txt`** — module overview: `crate|module|file|pub_count|kinds|doc`

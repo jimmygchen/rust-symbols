@@ -114,7 +114,6 @@ fn extract_item(
                 name: name.clone(),
                 kind: SymbolKind::Struct,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
@@ -127,7 +126,6 @@ fn extract_item(
                 name: name.clone(),
                 kind: SymbolKind::Enum,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
@@ -140,20 +138,17 @@ fn extract_item(
                 name,
                 kind: SymbolKind::Trait,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
         }
         syn::Item::Fn(f) if is_pub(&f.vis) => {
             let name = f.sig.ident.to_string();
-            let line = line_of_span(source, f.sig.ident.span());
             let sig = extract_fn_signature(&f.sig, &f.vis);
             symbols.push(Symbol {
                 name,
                 kind: SymbolKind::Fn,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
@@ -166,7 +161,6 @@ fn extract_item(
                 name,
                 kind: SymbolKind::Type,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
@@ -179,7 +173,6 @@ fn extract_item(
                 name,
                 kind: SymbolKind::Const,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
@@ -192,19 +185,16 @@ fn extract_item(
                 name,
                 kind: SymbolKind::Static,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
         }
         syn::Item::Mod(m) if is_pub(&m.vis) => {
             let name = m.ident.to_string();
-            let line = line_of_span(source, m.ident.span());
             symbols.push(Symbol {
                 name,
                 kind: SymbolKind::Mod,
                 path: path.to_string(),
-                line,
                 signature: format!("pub mod {}", m.ident),
                 crate_name: crate_name.to_string(),
             });
@@ -217,7 +207,6 @@ fn extract_item(
                 name,
                 kind: SymbolKind::Union,
                 path: path.to_string(),
-                line,
                 signature: sig,
                 crate_name: crate_name.to_string(),
             });
@@ -253,13 +242,11 @@ fn extract_impl(
         match item {
             syn::ImplItem::Fn(method) if is_pub_impl(&method.vis) => {
                 let name = format!("{}::{}", type_name, method.sig.ident);
-                let line = line_of_span(source, method.sig.ident.span());
                 let sig = extract_fn_signature(&method.sig, &method.vis);
                 symbols.push(Symbol {
                     name,
                     kind: SymbolKind::Fn,
                     path: path.to_string(),
-                    line,
                     signature: sig,
                     crate_name: crate_name.to_string(),
                 });
@@ -272,7 +259,6 @@ fn extract_impl(
                     name,
                     kind: SymbolKind::Type,
                     path: path.to_string(),
-                    line,
                     signature: sig,
                     crate_name: crate_name.to_string(),
                 });
@@ -285,7 +271,6 @@ fn extract_impl(
                     name,
                     kind: SymbolKind::Const,
                     path: path.to_string(),
-                    line,
                     signature: sig,
                     crate_name: crate_name.to_string(),
                 });

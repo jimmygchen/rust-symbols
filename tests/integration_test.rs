@@ -1,13 +1,11 @@
 use std::path::Path;
 
 /// Helper: run the extractor on inline Rust source and return symbols
-fn extract_source(source: &str) -> Vec<(String, String, usize, String)> {
-    // We need to test the internal extraction logic, so we'll use the binary
-    // For unit tests, we test via a temp crate structure
+/// Returns (name, kind, path, signature) tuples.
+fn extract_source(source: &str) -> Vec<(String, String, String, String)> {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path();
 
-    // Create a minimal workspace
     std::fs::write(
         ws.join("Cargo.toml"),
         r#"[workspace]
@@ -29,7 +27,6 @@ edition = "2021"
     .unwrap();
     std::fs::write(crate_dir.join("src/lib.rs"), source).unwrap();
 
-    // Run rust-index
     let output_dir = ws.join("index");
     let binary = env!("CARGO_BIN_EXE_rust-index");
     let output = std::process::Command::new(binary)
@@ -46,22 +43,18 @@ edition = "2021"
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Parse symbols.txt
+    // Parse symbols.txt — format: name|kind|path|signature
     let symbols_content = std::fs::read_to_string(output_dir.join("symbols.txt")).unwrap();
     symbols_content
         .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|line| {
             let parts: Vec<&str> = line.splitn(4, '|').collect();
             assert!(parts.len() == 4, "bad line: {}", line);
-            let path_line = parts[2];
-            let colon = path_line.rfind(':').unwrap();
-            let line_num: usize = path_line[colon + 1..].parse().unwrap();
             (
                 parts[0].to_string(), // name
                 parts[1].to_string(), // kind
-                line_num,
+                parts[2].to_string(), // path
                 parts[3].to_string(), // signature
             )
         })
@@ -69,9 +62,9 @@ edition = "2021"
 }
 
 fn find_symbol<'a>(
-    symbols: &'a [(String, String, usize, String)],
+    symbols: &'a [(String, String, String, String)],
     name: &str,
-) -> Option<&'a (String, String, usize, String)> {
+) -> Option<&'a (String, String, String, String)> {
     symbols.iter().find(|s| s.0 == name)
 }
 

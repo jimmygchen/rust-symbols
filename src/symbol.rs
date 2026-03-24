@@ -36,7 +36,6 @@ pub struct Symbol {
     pub kind: SymbolKind,
     /// Relative path from workspace root
     pub path: String,
-    pub line: usize,
     /// Signature (truncated to 120 chars)
     pub signature: String,
     /// Crate this symbol belongs to

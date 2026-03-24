@@ -1,4 +1,4 @@
-# rust-index Eval Harness
+# rust-symbols Eval Harness
 
 Measures the effectiveness of code indexers by running navigation and comprehension
 tasks against a codebase using Claude with tool use, comparing token usage,
@@ -55,7 +55,7 @@ eval/
 │   └── l2_comprehend.yaml  # Cross-file comprehension tasks (Lighthouse examples)
 ├── indexers/          # Pluggable indexer configs
 │   ├── baseline.yaml       # No index (control group)
-│   └── rust-index.yaml     # rust-index tool
+│   └── rust-symbols.yaml     # rust-symbols tool
 └── results/           # Output (timestamped JSON + latest)
 ```
 

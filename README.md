@@ -1,6 +1,8 @@
-# rust-index
+# rust-symbols
 
-Generates a compact, grep-friendly code index for Rust workspaces. Designed for LLM agents that need to navigate large codebases without reading every file.
+Compact, grep-friendly symbol index for Rust workspaces — built for LLM code agents.
+
+Built with [Claude Code](https://claude.ai/code).
 
 ## Quick Start
 
@@ -8,7 +10,7 @@ Generates a compact, grep-friendly code index for Rust workspaces. Designed for 
 
 ```bash
 cargo install --path .
-rust-index /path/to/project --skip-statics
+rust-symbols /path/to/project --skip-statics
 # Commit .ai/index/ to your repo — it stays valid until you add/remove/rename public symbols.
 ```
 
@@ -45,7 +47,7 @@ Each line returns: `name|kind|path|signature` — grep the source file for the s
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(cargo build|cargo check|cargo test)'; then rust-index /path/to/project --output .ai/index --skip-statics; fi"
+            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(cargo build|cargo check|cargo test)'; then rust-symbols /path/to/project --output .ai/index --skip-statics; fi"
           }
         ]
       }

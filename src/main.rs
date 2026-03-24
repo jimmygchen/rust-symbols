@@ -9,7 +9,7 @@ use std::time::Instant;
 
 #[derive(Parser)]
 #[command(
-    name = "rust-index",
+    name = "rust-symbols",
     about = "Generate compact code index for LLM agents"
 )]
 struct Cli {

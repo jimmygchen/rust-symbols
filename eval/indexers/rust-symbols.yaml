@@ -1,5 +1,5 @@
-name: rust-index
-setup_command: "cargo run --manifest-path {workspace}/../rust-index/Cargo.toml --release -- {workspace} --skip-statics"
+name: rust-symbols
+setup_command: "cargo run --manifest-path {workspace}/../rust-symbols/Cargo.toml --release -- {workspace} --skip-statics"
 system_prompt_extra: |
   You have a code index available in .ai/index/ with these files:
   - symbols.txt: One line per public symbol. Format: name|kind|path|signature

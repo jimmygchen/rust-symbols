@@ -28,7 +28,7 @@ edition = "2021"
     std::fs::write(crate_dir.join("src/lib.rs"), source).unwrap();
 
     let output_dir = ws.join("index");
-    let binary = env!("CARGO_BIN_EXE_rust-index");
+    let binary = env!("CARGO_BIN_EXE_rust-symbols");
     let output = std::process::Command::new(binary)
         .arg(ws.to_str().unwrap())
         .arg("--output")
@@ -329,7 +329,7 @@ edition = "2021"
     }
 
     let output_dir = ws.join("index");
-    let binary = env!("CARGO_BIN_EXE_rust-index");
+    let binary = env!("CARGO_BIN_EXE_rust-symbols");
     let output = std::process::Command::new(binary)
         .arg(ws.to_str().unwrap())
         .arg("--output")
@@ -342,7 +342,7 @@ edition = "2021"
     let lines: Vec<&str> = crates.lines().collect();
 
     // Header lines
-    assert!(lines[0].starts_with("# rust-index crates"));
+    assert!(lines[0].starts_with("# rust-symbols crates"));
     assert!(lines[0].contains("2 crates"));
     assert_eq!(lines[1], "# crate|path|deps");
 
@@ -379,7 +379,7 @@ edition = "2021"
     std::fs::write(d.join("src/sub/mod.rs"), "pub fn sub_fn() {}").unwrap();
 
     let output_dir = ws.join("index");
-    let binary = env!("CARGO_BIN_EXE_rust-index");
+    let binary = env!("CARGO_BIN_EXE_rust-symbols");
     let output = std::process::Command::new(binary)
         .arg(ws.to_str().unwrap())
         .arg("--output")
@@ -421,7 +421,7 @@ fn test_lighthouse_integration() {
     }
 
     let output_dir = tempfile::tempdir().unwrap();
-    let binary = env!("CARGO_BIN_EXE_rust-index");
+    let binary = env!("CARGO_BIN_EXE_rust-symbols");
     let output = std::process::Command::new(binary)
         .arg(lighthouse_path.to_str().unwrap())
         .arg("--output")

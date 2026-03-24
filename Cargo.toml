@@ -1,10 +1,10 @@
 [package]
-name = "rust-index"
+name = "rust-symbols"
 version = "0.1.0"
 edition = "2021"
 description = "Compact, grep-friendly code index for Rust workspaces — built for LLM agents"
 license = "MIT"
-repository = "https://github.com/jimmygchen/rust-index"
+repository = "https://github.com/jimmygchen/rust-symbols"
 keywords = ["llm", "index", "code-navigation", "rust-analyzer", "ai"]
 categories = ["development-tools", "command-line-utilities"]
 

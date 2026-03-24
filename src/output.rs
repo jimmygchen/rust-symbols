@@ -10,7 +10,7 @@ pub fn generate_crates_idx(crates: &[CrateInfo], output_dir: &Path) -> std::io::
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
 
     let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-    writeln!(f, "# rust-index crates | {} | {} crates", ts, crates.len())?;
+    writeln!(f, "# rust-symbols crates | {} | {} crates", ts, crates.len())?;
     writeln!(f, "# crate|path|deps")?;
 
     let crate_names: Vec<&str> = crates.iter().map(|c| c.name.as_str()).collect();
@@ -50,7 +50,7 @@ pub fn generate_symbols_idx(symbols: &[Symbol], output_dir: &Path) -> std::io::R
         let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             f,
-            "# rust-index symbols/{} | {} | {} symbols",
+            "# rust-symbols symbols/{} | {} | {} symbols",
             crate_name,
             ts,
             crate_symbols.len()
@@ -74,7 +74,7 @@ pub fn generate_symbols_idx(symbols: &[Symbol], output_dir: &Path) -> std::io::R
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         f,
-        "# rust-index symbols | {} | {} symbols",
+        "# rust-symbols symbols | {} | {} symbols",
         ts,
         symbols.len()
     )?;
@@ -150,7 +150,7 @@ pub fn generate_modules_idx(
         })
         .collect();
 
-    writeln!(f, "# rust-index modules | {}", ts)?;
+    writeln!(f, "# rust-symbols modules | {}", ts)?;
     writeln!(f, "# crate|module_path|file|pub_count|kinds|doc")?;
 
     for m in &modules {

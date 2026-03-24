@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Eval harness for comparing code indexer / knowledge-graph effectiveness.
 
-Runs navigation and comprehension tasks against a Rust workspace using the
-Claude API with tool use, measuring tokens, tool calls, wall time, and
-correctness across pluggable indexer configurations.
+Runs navigation and comprehension tasks against a codebase using the Claude API
+with tool use, measuring tokens, tool calls, wall time, and correctness across
+pluggable indexer configurations.
 
 Usage:
-    python runner.py --workspace /path/to/lighthouse
-    python runner.py --workspace /path/to/lighthouse --task-id l1_sync_manager --indexer-name baseline --runs 1
-    python runner.py --workspace /path/to/lighthouse --results results/prev.json  # re-report only
+    python runner.py --workspace /path/to/project --runs 1
+    python runner.py --workspace /path/to/project --task-id find_struct --indexer-name baseline --runs 1
+    python runner.py --workspace /path/to/project --results results/results-latest.json
 """
 
 import argparse
@@ -19,19 +19,137 @@ import re
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import yaml
-
 import httpx
+import yaml
 
 try:
     from anthropic import Anthropic
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
+
+
+# ---------------------------------------------------------------------------
+# API client (supports both direct Anthropic API and Bedrock)
+# ---------------------------------------------------------------------------
+
+MODEL_ALIASES = {
+    "sonnet": "claude-sonnet-4-20250514",
+    "haiku": "claude-haiku-4-5-20251001",
+    "opus": "claude-opus-4-6",
+}
+
+BEDROCK_MODEL_MAP = {
+    "claude-sonnet-4-20250514": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1:0",
+}
+
+
+class ContentBlock:
+    """A single content block from an API response."""
+    def __init__(self, data: dict):
+        self.type = data.get("type")
+        self.text = data.get("text", "")
+        self.id = data.get("id", "")
+        self.name = data.get("name", "")
+        self.input = data.get("input", {})
+
+
+class MessageResponse:
+    """Unified response wrapper for both Anthropic SDK and raw Bedrock."""
+    def __init__(self, data: dict):
+        self.content = [ContentBlock(b) for b in (data.get("content") or [])]
+        usage = data.get("usage") or {}
+        self.input_tokens = usage.get("input_tokens", 0)
+        self.output_tokens = usage.get("output_tokens", 0)
+        self.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
+
+
+class BedrockClient:
+    """Minimal Messages API client for Bedrock with bearer token auth."""
+
+    def __init__(self, region: str, token: str):
+        self.base = f"https://bedrock-runtime.{region}.amazonaws.com"
+        self.token = token
+        self.http = httpx.Client(timeout=120)
+
+    def create_message(self, *, model: str, max_tokens: int, system: str,
+                       tools: list, messages: list) -> dict:
+        url = f"{self.base}/model/{model}/invoke"
+        resp = self.http.post(url, json={
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "system": system,
+            "tools": tools,
+            "messages": messages,
+        }, headers={
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        })
+        if resp.status_code != 200:
+            raise RuntimeError(f"Bedrock {resp.status_code}: {resp.text[:300]}")
+        return resp.json()
+
+
+class UnifiedClient:
+    """Auto-detects Bedrock or direct Anthropic API based on env vars."""
+
+    def __init__(self):
+        self.is_bedrock = False
+        self._bedrock = None
+        self._anthropic = None
+
+        use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK", "").strip()
+        bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+        region = os.environ.get("AWS_REGION", "us-west-2")
+
+        if use_bedrock == "1" and bearer:
+            print(f"Using Bedrock (region={region})")
+            self.is_bedrock = True
+            self._bedrock = BedrockClient(region, bearer)
+        elif HAS_ANTHROPIC:
+            print("Using Anthropic API")
+            self._anthropic = Anthropic()
+        else:
+            raise RuntimeError(
+                "No API credentials found. Set ANTHROPIC_API_KEY or "
+                "CLAUDE_CODE_USE_BEDROCK=1 + AWS_BEARER_TOKEN_BEDROCK."
+            )
+
+    def create_message(self, *, model: str, max_tokens: int, system: str,
+                       tools: list, messages: list) -> MessageResponse:
+        if self.is_bedrock:
+            bedrock_model = BEDROCK_MODEL_MAP.get(model, model)
+            data = self._bedrock.create_message(
+                model=bedrock_model, max_tokens=max_tokens,
+                system=system, tools=tools, messages=messages,
+            )
+            return MessageResponse(data)
+
+        r = self._anthropic.messages.create(
+            model=model, max_tokens=max_tokens,
+            system=system, tools=tools, messages=messages,
+        )
+        data = {
+            "content": [
+                {"type": b.type, "text": getattr(b, "text", ""),
+                 "id": getattr(b, "id", ""), "name": getattr(b, "name", ""),
+                 "input": getattr(b, "input", {})}
+                for b in r.content
+            ],
+            "usage": {
+                "input_tokens": r.usage.input_tokens,
+                "output_tokens": r.usage.output_tokens,
+                "cache_read_input_tokens": getattr(r.usage, "cache_read_input_tokens", 0) or 0,
+            },
+        }
+        return MessageResponse(data)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +172,7 @@ class RunResult:
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
+    peak_input_tokens: int
     tool_calls: list  # list[ToolCall]
     wall_time_ms: int
     turns: int
@@ -71,7 +190,7 @@ class Task:
     description: str
     verify_type: str
     verify_values: list
-    max_turns: int = 25
+    max_turns: int = 10
 
 
 @dataclass
@@ -103,7 +222,7 @@ def load_tasks(path: str) -> list:
                 description=t["description"],
                 verify_type=t["verify"]["type"],
                 verify_values=t["verify"]["values"],
-                max_turns=t.get("max_turns", 25),
+                max_turns=t.get("max_turns", 10),
             ))
     return tasks
 
@@ -137,14 +256,14 @@ TOOL_DEFS = [
             "properties": {
                 "path": {"type": "string", "description": "Relative path from workspace root"},
                 "offset": {"type": "integer", "description": "Start line (1-based)"},
-                "limit": {"type": "integer", "description": "Max lines to return"},
+                "limit": {"type": "integer", "description": "Max lines to return (capped at 200)"},
             },
             "required": ["path"],
         },
     },
     {
         "name": "grep",
-        "description": "Search for a regex pattern in a file or directory. Returns matching lines with numbers.",
+        "description": "Search for a regex pattern in a file or directory. Returns matching lines with line numbers (max 50 matches).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -157,7 +276,7 @@ TOOL_DEFS = [
     },
     {
         "name": "glob_files",
-        "description": "Find files matching a glob pattern. Returns relative paths.",
+        "description": "Find files matching a glob pattern. Returns relative paths (max 100).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -169,7 +288,7 @@ TOOL_DEFS = [
     },
     {
         "name": "bash",
-        "description": "Run a read-only shell command. Write operations are blocked.",
+        "description": "Run a read-only shell command (max 10KB output). Write operations are blocked.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -196,11 +315,18 @@ TOOL_DEFS = [
 # Tool execution
 # ---------------------------------------------------------------------------
 
+MAX_READ_LINES = 200
+MAX_GREP_MATCHES = 50
+MAX_GLOB_RESULTS = 100
+MAX_BASH_OUTPUT = 10_000
+
+
 def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def _resolve_path(path: str, workspace: str) -> str:
+def _resolve_path(path: str, workspace: str) -> Optional[str]:
+    """Resolve a relative path within the workspace. Returns None if it escapes."""
     resolved = Path(os.path.join(workspace, path)).resolve()
     ws = Path(workspace).resolve()
     if not str(resolved).startswith(str(ws)):
@@ -209,6 +335,8 @@ def _resolve_path(path: str, workspace: str) -> str:
 
 
 def execute_tool(name: str, params: dict, workspace: str) -> str:
+    """Execute a tool call and return the result string."""
+
     if name == "read_file":
         resolved = _resolve_path(params["path"], workspace)
         if not resolved:
@@ -217,20 +345,17 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
             with open(resolved) as f:
                 lines = f.readlines()
             offset = max(0, params.get("offset", 1) - 1)
-            limit = min(params.get("limit", 200), 200)  # Hard cap at 200 lines
+            limit = min(params.get("limit", MAX_READ_LINES), MAX_READ_LINES)
             selected = lines[offset:offset + limit]
-            total = len(lines)
-            if offset + limit < total:
-                # Tell agent there's more they didn't see
-                truncation_note = f"\n[... truncated at line {offset + limit}/{total}. Use offset to read more.]\n"
-            else:
-                truncation_note = ""
             if not selected:
                 return "(empty or beyond end of file)"
             content = "".join(
                 f"{offset + i + 1:>6}| {line}" for i, line in enumerate(selected)
             )
-            return content + truncation_note
+            total = len(lines)
+            if offset + limit < total:
+                content += f"\n[... truncated at line {offset + limit}/{total}. Use offset to read more.]\n"
+            return content
         except Exception as e:
             return f"Error: {e}"
 
@@ -246,8 +371,9 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
                 timeout=15, cwd=workspace,
             )
             lines = result.stdout.splitlines(keepends=True)
-            if len(lines) > 50:
-                output = "".join(lines[:50]) + f"\n[... {len(lines) - 50} more matches truncated]\n"
+            if len(lines) > MAX_GREP_MATCHES:
+                output = "".join(lines[:MAX_GREP_MATCHES])
+                output += f"\n[... {len(lines) - MAX_GREP_MATCHES} more matches truncated]\n"
             else:
                 output = result.stdout
             return output if output.strip() else "(no matches)"
@@ -261,21 +387,17 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
             return "Error: path outside workspace"
         pattern = params["pattern"]
         matches = sorted(glob_mod.glob(os.path.join(resolved, pattern), recursive=True))
+        truncated = len(matches) > MAX_GLOB_RESULTS
         ws = Path(workspace).resolve()
         rel = []
-        if len(matches) > 100:
-            truncated = True
-            matches = matches[:100]
-        else:
-            truncated = False
-        for m in matches:
+        for m in matches[:MAX_GLOB_RESULTS]:
             try:
                 rel.append(str(Path(m).relative_to(ws)))
             except ValueError:
                 pass
         result = "\n".join(rel) if rel else "(no matches)"
         if truncated:
-            result += f"\n[... truncated to 100 results]"
+            result += f"\n[... truncated to {MAX_GLOB_RESULTS} results]"
         return result
 
     elif name == "bash":
@@ -288,7 +410,7 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
                 cmd, shell=True, capture_output=True, text=True,
                 timeout=30, cwd=workspace,
             )
-            output = (result.stdout + result.stderr)[:10_000]
+            output = (result.stdout + result.stderr)[:MAX_BASH_OUTPUT]
             return output if output else "(no output)"
         except subprocess.TimeoutExpired:
             return "Error: command timed out"
@@ -320,14 +442,15 @@ def verify(answer: str, vtype: str, values: list) -> bool:
 # Agent loop
 # ---------------------------------------------------------------------------
 
-BASE_SYSTEM = """You are a code navigation agent working on a Rust workspace.
+BASE_SYSTEM = """\
+You are a code navigation agent working on a codebase.
 All file paths are relative to the workspace root.
 Use the available tools to complete the task efficiently — minimize tool calls while ensuring accuracy.
 When you have found the answer, call submit_answer with your complete findings."""
 
 
 def run_task(
-    client,
+    client: UnifiedClient,
     task: Task,
     indexer: Indexer,
     workspace: str,
@@ -343,6 +466,7 @@ def run_task(
     total_input = 0
     total_output = 0
     total_cache_read = 0
+    peak_input = 0
     tool_calls = []
     turns = 0
     answer = ""
@@ -359,7 +483,11 @@ def run_task(
             if turns >= task.max_turns - 1:
                 cur_messages.append({
                     "role": "user",
-                    "content": "You have 1 turn left. Call submit_answer NOW with your best answer based on what you've found so far. Do not make any more tool calls except submit_answer.",
+                    "content": (
+                        "You have 1 turn left. Call submit_answer NOW with your "
+                        "best answer based on what you've found so far. Do not "
+                        "make any more tool calls except submit_answer."
+                    ),
                 })
 
             # Retry with exponential backoff on rate limits
@@ -376,7 +504,7 @@ def run_task(
                     break
                 except RuntimeError as e:
                     if "429" in str(e) and attempt < 4:
-                        wait = 2 ** attempt * 5  # 5, 10, 20, 40, 80 seconds
+                        wait = 2 ** attempt * 5
                         print(f"\n         Rate limited, waiting {wait}s...", end="", flush=True)
                         time.sleep(wait)
                     else:
@@ -387,6 +515,7 @@ def run_task(
             total_input += response.input_tokens
             total_output += response.output_tokens
             total_cache_read += response.cache_read_tokens
+            peak_input = max(peak_input, response.input_tokens)
 
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             text_blocks = [b for b in response.content if b.type == "text"]
@@ -458,6 +587,7 @@ def run_task(
         input_tokens=total_input,
         output_tokens=total_output,
         cache_read_tokens=total_cache_read,
+        peak_input_tokens=peak_input,
         tool_calls=tool_calls,
         wall_time_ms=wall_time,
         turns=turns,
@@ -499,6 +629,7 @@ def result_to_dict(r: RunResult) -> dict:
         "output_tokens": r.output_tokens,
         "cache_read_tokens": r.cache_read_tokens,
         "total_tokens": r.input_tokens + r.output_tokens,
+        "peak_input_tokens": r.peak_input_tokens,
         "tool_call_count": len(r.tool_calls),
         "tool_calls": [
             {
@@ -522,8 +653,6 @@ def result_to_dict(r: RunResult) -> dict:
 # ---------------------------------------------------------------------------
 
 def print_summary(results: list, indexer_names: list):
-    from collections import defaultdict
-
     by_indexer = defaultdict(list)
     for r in results:
         by_indexer[r["indexer"]].append(r)
@@ -536,7 +665,6 @@ def print_summary(results: list, indexer_names: list):
     print("SUMMARY")
     print("=" * 80)
 
-    # Overall metrics
     col_w = 22
     header = f"{'Metric':<28}" + "".join(f"{n:>{col_w}}" for n in names)
     print(header)
@@ -546,6 +674,7 @@ def print_summary(results: list, indexer_names: list):
         ("Avg total tokens", lambda runs: sum(r["total_tokens"] for r in runs) / len(runs)),
         ("Avg input tokens", lambda runs: sum(r["input_tokens"] for r in runs) / len(runs)),
         ("Avg output tokens", lambda runs: sum(r["output_tokens"] for r in runs) / len(runs)),
+        ("Avg peak context", lambda runs: sum(r.get("peak_input_tokens", 0) for r in runs) / len(runs)),
         ("Avg tool calls", lambda runs: sum(r["tool_call_count"] for r in runs) / len(runs)),
         ("Avg turns", lambda runs: sum(r["turns"] for r in runs) / len(runs)),
         ("Avg wall time (ms)", lambda runs: sum(r["wall_time_ms"] for r in runs) / len(runs)),
@@ -562,7 +691,6 @@ def print_summary(results: list, indexer_names: list):
             if label == "Accuracy (%)":
                 row += f"{val:>{col_w - 1}.0f}%"
             else:
-                # Show delta vs first indexer (baseline)
                 base = baseline_vals[label]
                 if i > 0 and base > 0:
                     delta_pct = (val - base) / base * 100
@@ -577,13 +705,7 @@ def print_summary(results: list, indexer_names: list):
     print(f"{'':28}" + "".join(f"{n:>22}" for n in names))
     print("-" * (28 + 22 * len(names)))
 
-    task_ids = []
-    seen = set()
-    for r in results:
-        if r["task_id"] not in seen:
-            task_ids.append(r["task_id"])
-            seen.add(r["task_id"])
-
+    task_ids = list(dict.fromkeys(r["task_id"] for r in results))
     for tid in task_ids:
         row = f"{tid:<28}"
         for name in names:
@@ -602,132 +724,17 @@ def print_summary(results: list, indexer_names: list):
 # Main
 # ---------------------------------------------------------------------------
 
-MODEL_ALIASES = {
-    "sonnet": "claude-sonnet-4-20250514",
-    "haiku": "claude-haiku-4-5-20251001",
-    "opus": "claude-opus-4-6",
-}
-
-BEDROCK_MODEL_MAP = {
-    "claude-sonnet-4-20250514": "us.anthropic.claude-sonnet-4-20250514-v1:0",
-    "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1:0",
-}
-
-
-class BedrockClient:
-    """Minimal Messages API client for Bedrock with bearer token auth."""
-
-    def __init__(self, region: str, token: str):
-        self.base = f"https://bedrock-runtime.{region}.amazonaws.com"
-        self.token = token
-        self.http = httpx.Client(timeout=120)
-
-    def create_message(self, *, model: str, max_tokens: int, system: str,
-                       tools: list, messages: list):
-        url = f"{self.base}/model/{model}/invoke"
-        body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "system": system,
-            "tools": tools,
-            "messages": messages,
-        }
-        resp = self.http.post(url, json=body, headers={
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        })
-        if resp.status_code != 200:
-            raise RuntimeError(f"Bedrock {resp.status_code}: {resp.text[:300]}")
-        return resp.json()
-
-
-class MessageResponse:
-    """Unified response wrapper for both Anthropic SDK and raw Bedrock."""
-
-    def __init__(self, data: dict):
-        self.content = []
-        for block in (data.get("content") or []):
-            self.content.append(ContentBlock(block))
-        usage = data.get("usage") or {}
-        self.input_tokens = usage.get("input_tokens", 0)
-        self.output_tokens = usage.get("output_tokens", 0)
-        self.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-
-
-class ContentBlock:
-    def __init__(self, data: dict):
-        self.type = data.get("type")
-        self.text = data.get("text", "")
-        self.id = data.get("id", "")
-        self.name = data.get("name", "")
-        self.input = data.get("input", {})
-
-
-class UnifiedClient:
-    """Wraps either Anthropic SDK or raw Bedrock HTTP."""
-
-    def __init__(self):
-        self.is_bedrock = False
-        self._bedrock = None
-        self._anthropic = None
-
-        use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK", "").strip()
-        bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
-        region = os.environ.get("AWS_REGION", "us-west-2")
-
-        if use_bedrock == "1" and bearer:
-            print(f"Using Bedrock (region={region})")
-            self.is_bedrock = True
-            self._bedrock = BedrockClient(region, bearer)
-        elif HAS_ANTHROPIC:
-            print("Using direct Anthropic API")
-            self._anthropic = Anthropic()
-        else:
-            raise RuntimeError("No API credentials found. Set ANTHROPIC_API_KEY or Bedrock env vars.")
-
-    def create_message(self, *, model: str, max_tokens: int, system: str,
-                       tools: list, messages: list) -> MessageResponse:
-        if self.is_bedrock:
-            bedrock_model = BEDROCK_MODEL_MAP.get(model, model)
-            data = self._bedrock.create_message(
-                model=bedrock_model, max_tokens=max_tokens,
-                system=system, tools=tools, messages=messages,
-            )
-            return MessageResponse(data)
-        else:
-            r = self._anthropic.messages.create(
-                model=model, max_tokens=max_tokens,
-                system=system, tools=tools, messages=messages,
-            )
-            # Convert SDK response to our unified format
-            data = {
-                "content": [
-                    {"type": b.type, "text": getattr(b, "text", ""),
-                     "id": getattr(b, "id", ""), "name": getattr(b, "name", ""),
-                     "input": getattr(b, "input", {})}
-                    for b in r.content
-                ],
-                "usage": {
-                    "input_tokens": r.usage.input_tokens,
-                    "output_tokens": r.usage.output_tokens,
-                    "cache_read_input_tokens": getattr(r.usage, "cache_read_input_tokens", 0) or 0,
-                },
-            }
-            return MessageResponse(data)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Eval harness for code indexers")
-    parser.add_argument("--workspace", required=True, help="Path to Rust workspace")
+    parser.add_argument("--workspace", required=True, help="Path to codebase root")
     parser.add_argument("--tasks", default="tasks", help="Task YAML file or directory")
     parser.add_argument("--indexers", default="indexers", help="Indexer config file or directory")
-    parser.add_argument("--runs", type=int, default=3, help="Runs per task×indexer")
-    parser.add_argument("--model", default="sonnet", help="Model name or alias")
-    parser.add_argument("--output", default="results", help="Output directory")
+    parser.add_argument("--runs", type=int, default=3, help="Runs per task per indexer")
+    parser.add_argument("--model", default="sonnet", help="Model name or alias (sonnet/haiku/opus)")
+    parser.add_argument("--output", default="results", help="Output directory for results")
     parser.add_argument("--task-id", help="Run only this task ID")
     parser.add_argument("--indexer-name", help="Run only this indexer")
-    parser.add_argument("--results", help="Path to results.json — report only, no run")
+    parser.add_argument("--results", help="Path to results.json (report only, no run)")
     args = parser.parse_args()
 
     # Report-only mode
@@ -766,13 +773,12 @@ def main():
     print(f"Model: {model}")
     print(f"Workspace: {args.workspace}\n")
 
-    # Setup each indexer
     for indexer in indexers:
         setup_indexer(indexer, args.workspace)
 
-    # Run
     all_results = []
-    os.makedirs(args.output, exist_ok=True)
+    output_dir = Path(args.output) if Path(args.output).is_absolute() else script_dir / args.output
+    os.makedirs(output_dir, exist_ok=True)
 
     for task in tasks:
         for indexer in indexers:
@@ -794,13 +800,12 @@ def main():
 
     # Save results
     ts = time.strftime("%Y%m%d-%H%M%S")
-    results_file = os.path.join(args.output, f"results-{ts}.json")
+    results_file = output_dir / f"results-{ts}.json"
     with open(results_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {results_file}")
 
-    # Also save as latest
-    latest = os.path.join(args.output, "results-latest.json")
+    latest = output_dir / "results-latest.json"
     with open(latest, "w") as f:
         json.dump(all_results, f, indent=2)
 

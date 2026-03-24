@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(cargo build|cargo check|cargo test|cargo clippy|make )'; then cd /path/to/lighthouse && /path/to/rust-index . --output .ai/index; fi"
+            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(cargo build|cargo check|cargo test|cargo clippy|make )'; then cd /path/to/project && /path/to/rust-index . --output .ai/index --skip-statics; fi"
           }
         ]
       }

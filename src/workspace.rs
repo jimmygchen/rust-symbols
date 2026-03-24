@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct CrateInfo {
     pub name: String,
-    /// Path relative to workspace root (e.g., "beacon_node/beacon_chain/")
+    /// Path relative to workspace root (e.g., "crates/my_crate/")
     pub relative_path: String,
     /// Absolute path
     pub absolute_path: PathBuf,

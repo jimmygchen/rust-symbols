@@ -2,41 +2,38 @@
 
 Generates a compact, grep-friendly code index for Rust workspaces. Designed for LLM agents that need to navigate large codebases without reading every file.
 
-## Usage
+## Quick Start
+
+**1. Install and generate the index:**
 
 ```bash
 cargo install --path .
-
-# Generate index (writes to .ai/index/)
-rust-index /path/to/workspace --skip-statics
-
-# Custom output directory
-rust-index /path/to/workspace --output /path/to/output --stats
+rust-index /path/to/project --skip-statics
 ```
 
-## Output
+**2. Add to your `CLAUDE.md`** so the agent knows how to use it:
 
-Three index files are generated:
+```markdown
+## Code Index
 
-- **`symbols.txt`** — one line per public symbol: `name|kind|path:line|signature`
-- **`symbols/<crate>.txt`** — same, split per crate
-- **`crates.txt`** — workspace crates: `crate|path|internal_deps`
-- **`modules.txt`** — module overview: `crate|module|file|pub_count|kinds|doc`
+A pre-built index of all public symbols is available in `.ai/index/`.
+**Before using Grep or Glob to explore the codebase**, check the index first:
 
-## How Agents Use It
+- Find a type: `grep "^MyStruct" .ai/index/symbols.txt`
+- Find a method: `grep "^MyStruct::my_method" .ai/index/symbols.txt`
+- Find all methods on a type: `grep "^MyStruct::" .ai/index/symbols.txt`
+- Find which crate owns something: `grep "my_crate" .ai/index/crates.txt`
+- Browse a crate's symbols: `grep "." .ai/index/symbols/my_crate.txt`
 
-Agents **grep** the index files (never read them fully):
+Each line returns: `name|kind|path:line|signature` — go directly to the file and line.
 
-```bash
-grep "^BeaconChain::import" .ai/index/symbols.txt
-# → BeaconChain::import_block|fn|beacon_node/beacon_chain/src/beacon_chain.rs:2847|pub fn import_block...
+**Rules:**
+- Always use anchored grep patterns (`^TypeName`) to avoid broad matches
+- NEVER read symbols.txt with the Read tool — it's too large. Always grep it.
+- After finding a symbol, read the actual source file for context.
 ```
 
-One grep returns the file and line number, replacing multiple rounds of glob/read exploration.
-
-## Claude Code Hook
-
-Auto-regenerate the index after builds by adding to `.claude/settings.json`:
+**3. Auto-regenerate after builds** by adding to `.claude/settings.json`:
 
 ```json
 {
@@ -55,6 +52,13 @@ Auto-regenerate the index after builds by adding to `.claude/settings.json`:
   }
 }
 ```
+
+## Output
+
+- **`symbols.txt`** — one line per public symbol: `name|kind|path:line|signature`
+- **`symbols/<crate>.txt`** — same, split per crate
+- **`crates.txt`** — workspace crates: `crate|path|internal_deps`
+- **`modules.txt`** — module overview: `crate|module|file|pub_count|kinds|doc`
 
 ## Eval Harness
 

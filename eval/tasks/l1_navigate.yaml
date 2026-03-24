@@ -1,0 +1,56 @@
+tasks:
+  - id: l1_sync_manager
+    level: 1
+    category: navigate
+    description: "Find the SyncManager struct definition"
+    prompt: >
+      Find where the SyncManager struct is defined in the Lighthouse codebase.
+      Return the file path, line number, and list the struct's generic parameters or key fields.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "sync/manager.rs"
+        - "SyncManager"
+
+  - id: l1_fork_choice_on_block
+    level: 1
+    category: navigate
+    description: "Find ForkChoice::on_block method"
+    prompt: >
+      Find the on_block method on ForkChoice (or the fork choice store) in the Lighthouse codebase.
+      Return the file path, line number, and the method signature.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "fork_choice"
+        - "on_block"
+
+  - id: l1_hot_cold_db
+    level: 1
+    category: navigate
+    description: "Find HotColdDB and its store_finalized_state-related method"
+    prompt: >
+      Find the HotColdDB struct definition and any method related to storing finalized states.
+      Return file paths, line numbers, and method signatures.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "HotColdDB"
+        - "finalized"
+
+  - id: l1_execution_layer
+    level: 1
+    category: navigate
+    description: "Find ExecutionLayer and block proposal method"
+    prompt: >
+      Find the ExecutionLayer struct and the method it uses to prepare or get an execution
+      payload for block proposals. Return file path, line number, and signature.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "ExecutionLayer"
+        - "payload"

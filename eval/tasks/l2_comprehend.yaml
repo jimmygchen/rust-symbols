@@ -1,0 +1,50 @@
+tasks:
+  - id: l2_block_import
+    level: 2
+    category: comprehend
+    description: "Trace the block import flow"
+    prompt: >
+      Trace the block import flow in Lighthouse: starting from when a block arrives
+      via gossip or RPC, through validation, to when it is stored. Identify the key
+      functions/methods involved and their file locations. Be specific about file paths
+      and line numbers.
+    max_turns: 10
+    verify:
+      type: contains_any
+      values:
+        - "process_block"
+        - "import_block"
+        - "block_processing"
+        - "beacon_chain"
+
+  - id: l2_attestation_verify
+    level: 2
+    category: comprehend
+    description: "Explain attestation verification"
+    prompt: >
+      How does Lighthouse verify attestations? Find the main attestation verification
+      entry point(s), what checks are performed, and where the code lives.
+      Include specific file paths and function names.
+    max_turns: 10
+    verify:
+      type: contains_any
+      values:
+        - "verify"
+        - "attestation_verification"
+        - "verify_attestation"
+        - "initialized_attestation"
+
+  - id: l2_peer_disconnect
+    level: 2
+    category: comprehend
+    description: "Understand peer disconnection handling"
+    prompt: >
+      How does PeerManager handle peer disconnections in Lighthouse?
+      Find the relevant structs, methods, and explain what happens when a peer
+      disconnects. Include file paths and line numbers.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "PeerManager"
+        - "disconnect"

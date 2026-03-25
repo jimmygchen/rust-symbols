@@ -199,19 +199,23 @@ To establish ground truth, query the KG and read source code to build the full p
 Structure:
 
 ```
-Goal            — What we're improving (context, tokens, time, accuracy)
-Exec Summary    — Headline metrics table (baseline vs tools), key findings
-Methodology     — Harness, tools under test, task table, known limitations
-Results         — By-level table, per-task table, tool patterns, tool overhead
-                  (all with baseline comparison)
-Analysis        — Failure root causes, efficiency mechanism, capability gaps
-Recommendation  — Goals table vs baseline, when to use which, areas for improvement
-Appendix        — Raw files, ground truth, quality scores, environment
+Goal            — One-line question the eval answers (e.g. "can these tools
+                  improve accuracy / reduce tokens / speed up dev tasks?")
+Exec Summary    — Headline metrics table with Δ vs baseline columns
+                — Short findings grouped by metric (accuracy, efficiency, bottom line)
+                — No prose blobs — use labeled paragraphs, keep each to 1-2 sentences
+Task Design     — Task table, verification criteria, rationale
+Per-Task Results — Full table (baseline + each tool), failure analysis
+Recommendation  — Short/medium/long term, tied to the numbers
+Appendix        — Earlier iterations, raw files, methodology
 ```
 
 ### Reporting principles
 
-- **Always compare against baseline** — all deltas relative to no-tool
+- **Always compare against baseline** — summary table must include Δ columns
+- **Lead with the question** — exec summary opens with what we're trying to learn
+- **Findings by metric, not by tool** — group by accuracy/efficiency/cost, not by indexer
+- **Short labeled paragraphs** — `**Accuracy**: ...` not multi-sentence prose blocks
 - **Show all metrics** — accuracy, tokens, wall time, tool calls; no single metric tells the full story
 - **Include per-task data** — averages hide important differences
 - **Explain the mechanism** — not just "fewer tokens" but *why* (output density, query overhead)

@@ -1,21 +1,28 @@
 name: rust-symbols
 setup_command: "cargo run --manifest-path {workspace}/../rust-symbols/Cargo.toml --release -- {workspace} --skip-statics"
 system_prompt_extra: |
-  You have a code index available in .ai/index/ with these files:
+  A pre-built index of all public symbols is available in .ai/index/.
+  **Before using Grep or Glob to explore the codebase**, check the index first:
+
+  - Find a type: grep "^MyStruct" .ai/index/symbols.txt
+  - Find a method: grep "^MyStruct::my_method" .ai/index/symbols.txt
+  - Find all methods on a type: grep "^MyStruct::" .ai/index/symbols.txt
+  - Find which crate owns something: grep "my_crate" .ai/index/crates.txt
+  - Browse a crate's symbols: grep "." .ai/index/symbols/my_crate.txt
+
+  Each line returns: name|kind|path|signature — grep the source file for the signature to find the exact line.
+
+  Index files:
   - symbols.txt: One line per public symbol. Format: name|kind|path|signature
   - symbols/<crate>.txt: Same as above, split per crate
   - crates.txt: All workspace crates. Format: crate|path|internal_deps
   - modules.txt: Module-level overview. Format: crate|module|file|pub_count|kinds|doc
 
-  USAGE RULES:
-  - ALWAYS grep these files, NEVER read them fully (they are large)
-  - Use anchored patterns: grep "^SyncManager" for types, grep "^BeaconChain::import" for methods
+  Rules:
+  - Always use anchored grep patterns (^TypeName) to avoid broad matches
+  - NEVER read symbols.txt with the Read tool — it's too large. Always grep it.
+  - After finding a symbol, read the actual source file for context.
   - Use crates.txt to find which crate contains what
-  - After finding a symbol via index, grep the source file for the signature to find the exact line, then read for context
-
-  Example: to find where BeaconChain::import_block is defined:
-    grep "^BeaconChain::import" .ai/index/symbols.txt
-  This returns: BeaconChain::import_block|fn|beacon_node/beacon_chain/src/beacon_chain.rs|pub fn import_block...
 files:
   - .ai/index/symbols.txt
   - .ai/index/crates.txt

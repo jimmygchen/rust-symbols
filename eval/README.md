@@ -199,15 +199,15 @@ To establish ground truth, query the KG and read source code to build the full p
 Structure:
 
 ```
-Goal            — One-line question the eval answers (e.g. "can these tools
-                  improve accuracy / reduce tokens / speed up dev tasks?")
+Goal            — What metrics we're measuring (accuracy, tokens, time, context)
+                  and what tools are being compared
 Exec Summary    — Headline metrics table with Δ vs baseline columns
                 — Short findings grouped by metric (accuracy, efficiency, bottom line)
                 — No prose blobs — use labeled paragraphs, keep each to 1-2 sentences
 Task Design     — Task table, verification criteria, rationale
 Per-Task Results — Full table (baseline + each tool), failure analysis
-Recommendation  — Short/medium/long term, tied to the numbers
-Appendix        — Earlier iterations, raw files, methodology
+Tradeoffs       — Neutral comparison table, open questions for future work
+Appendix        — Raw files, methodology
 ```
 
 ### Reporting principles

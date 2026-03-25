@@ -12,25 +12,32 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import glob as glob_mod
+import importlib.util
 import json
+import math
 import os
+import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import yaml
 
 try:
+    import anthropic as _anthropic_mod
     from anthropic import Anthropic
     HAS_ANTHROPIC = True
 except ImportError:
+    _anthropic_mod = None
     HAS_ANTHROPIC = False
 
 
@@ -80,11 +87,13 @@ class BedrockClient:
         self.http = httpx.Client(timeout=120)
 
     def create_message(self, *, model: str, max_tokens: int, system: str,
-                       tools: list, messages: list) -> dict:
+                       tools: list, messages: list,
+                       temperature: float = 1.0) -> dict:
         url = f"{self.base}/model/{model}/invoke"
         resp = self.http.post(url, json={
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
+            "temperature": temperature,
             "system": system,
             "tools": tools,
             "messages": messages,
@@ -123,17 +132,19 @@ class UnifiedClient:
             )
 
     def create_message(self, *, model: str, max_tokens: int, system: str,
-                       tools: list, messages: list) -> MessageResponse:
+                       tools: list, messages: list,
+                       temperature: float = 1.0) -> MessageResponse:
         if self.is_bedrock:
             bedrock_model = BEDROCK_MODEL_MAP.get(model, model)
             data = self._bedrock.create_message(
                 model=bedrock_model, max_tokens=max_tokens,
                 system=system, tools=tools, messages=messages,
+                temperature=temperature,
             )
             return MessageResponse(data)
 
         r = self._anthropic.messages.create(
-            model=model, max_tokens=max_tokens,
+            model=model, max_tokens=max_tokens, temperature=temperature,
             system=system, tools=tools, messages=messages,
         )
         data = {
@@ -199,6 +210,12 @@ class Indexer:
     setup_command: Optional[str]
     system_prompt_extra: str
     files: list = field(default_factory=list)
+    tool_module_path: Optional[str] = None
+    tool_config: dict = field(default_factory=dict)
+    # Set at runtime by setup_indexer:
+    tool_module: Any = field(default=None, repr=False)
+    tool_context: Any = field(default=None, repr=False)
+    tool_names: set = field(default_factory=set, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +256,8 @@ def load_indexers(path: str) -> list:
             setup_command=data.get("setup_command"),
             system_prompt_extra=data.get("system_prompt_extra", ""),
             files=data.get("files", []),
+            tool_module_path=data.get("tool_module"),
+            tool_config=data.get("tool_config", {}),
         ))
     return indexers
 
@@ -288,7 +307,7 @@ TOOL_DEFS = [
     },
     {
         "name": "bash",
-        "description": "Run a read-only shell command (max 10KB output). Write operations are blocked.",
+        "description": "Run a read-only shell command (max 50KB output). Write operations are blocked.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -318,7 +337,13 @@ TOOL_DEFS = [
 MAX_READ_LINES = 200
 MAX_GREP_MATCHES = 50
 MAX_GLOB_RESULTS = 100
-MAX_BASH_OUTPUT = 10_000
+MAX_BASH_OUTPUT = 50_000
+MAX_TOOL_OUTPUT = 50_000  # Universal cap on any single tool result (bytes)
+
+# Context budget: truncate old tool results when message history gets large.
+# Sonnet has 200K context; leave headroom for system prompt + current turn.
+MAX_CONTEXT_CHARS = 500_000  # ~125K tokens (chars / 4 ≈ tokens)
+TRUNCATED_RESULT_PLACEHOLDER = "[output truncated to save context — use more specific queries]"
 
 
 def _shell_quote(s: str) -> str:
@@ -334,8 +359,24 @@ def _resolve_path(path: str, workspace: str) -> Optional[str]:
     return str(resolved)
 
 
-def execute_tool(name: str, params: dict, workspace: str) -> str:
+def _cap_output(result: str) -> str:
+    """Apply universal byte cap to any tool output."""
+    if len(result) > MAX_TOOL_OUTPUT:
+        return (
+            result[:MAX_TOOL_OUTPUT]
+            + f"\n[... output truncated at {MAX_TOOL_OUTPUT} bytes. "
+            f"Use more specific queries to narrow results.]"
+        )
+    return result
+
+
+def execute_tool(name: str, params: dict, workspace: str,
+                  indexer: Optional["Indexer"] = None) -> str:
     """Execute a tool call and return the result string."""
+
+    # Delegate to indexer tool module if it owns this tool
+    if indexer and indexer.tool_module and name in indexer.tool_names:
+        return _cap_output(indexer.tool_module.execute(name, params, indexer.tool_context))
 
     if name == "read_file":
         resolved = _resolve_path(params["path"], workspace)
@@ -355,7 +396,7 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
             total = len(lines)
             if offset + limit < total:
                 content += f"\n[... truncated at line {offset + limit}/{total}. Use offset to read more.]\n"
-            return content
+            return _cap_output(content)
         except Exception as e:
             return f"Error: {e}"
 
@@ -376,7 +417,7 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
                 output += f"\n[... {len(lines) - MAX_GREP_MATCHES} more matches truncated]\n"
             else:
                 output = result.stdout
-            return output if output.strip() else "(no matches)"
+            return _cap_output(output) if output.strip() else "(no matches)"
         except subprocess.TimeoutExpired:
             return "Error: grep timed out"
 
@@ -398,7 +439,7 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
         result = "\n".join(rel) if rel else "(no matches)"
         if truncated:
             result += f"\n[... truncated to {MAX_GLOB_RESULTS} results]"
-        return result
+        return _cap_output(result)
 
     elif name == "bash":
         cmd = params["command"]
@@ -408,7 +449,7 @@ def execute_tool(name: str, params: dict, workspace: str) -> str:
         try:
             result = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True,
-                timeout=30, cwd=workspace,
+                timeout=60, cwd=workspace,
             )
             output = (result.stdout + result.stderr)[:MAX_BASH_OUTPUT]
             return output if output else "(no output)"
@@ -446,7 +487,62 @@ BASE_SYSTEM = """\
 You are a code navigation agent working on a codebase.
 All file paths are relative to the workspace root.
 Use the available tools to complete the task efficiently — minimize tool calls while ensuring accuracy.
+You have a limited context window (~200K tokens). Prefer targeted queries over broad ones — \
+large tool outputs consume your budget and older results will be truncated.
 When you have found the answer, call submit_answer with your complete findings."""
+
+
+def _estimate_message_chars(messages):
+    """Rough estimate of total character count in messages."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    total += len(block.get("text", ""))
+                    total += len(block.get("content", ""))
+                    total += len(json.dumps(block.get("input", {}))) if block.get("input") else 0
+    return total
+
+
+def _truncate_messages(messages):
+    """Truncate old tool results when total message size exceeds budget.
+
+    Preserves the first message (task prompt) and the most recent 2 turns.
+    Replaces tool_result content in older messages with a short placeholder.
+    """
+    if _estimate_message_chars(messages) <= MAX_CONTEXT_CHARS:
+        return messages
+
+    # Keep first message + last 4 messages (2 turns = assistant + user each)
+    protected = {0} | {len(messages) - i - 1 for i in range(min(4, len(messages)))}
+
+    truncated = []
+    for i, msg in enumerate(messages):
+        if i in protected:
+            truncated.append(msg)
+            continue
+
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    c = block.get("content", "")
+                    if len(c) > 200:
+                        new_content.append({**block, "content": TRUNCATED_RESULT_PLACEHOLDER})
+                    else:
+                        new_content.append(block)
+                else:
+                    new_content.append(block)
+            truncated.append({**msg, "content": new_content})
+        else:
+            truncated.append(msg)
+
+    return truncated
 
 
 def run_task(
@@ -456,10 +552,16 @@ def run_task(
     workspace: str,
     model: str,
     run_number: int,
+    temperature: float = 0.0,
 ) -> RunResult:
     system = BASE_SYSTEM
     if indexer.system_prompt_extra:
         system += "\n\n" + indexer.system_prompt_extra
+
+    # Merge base tools with any indexer-provided tools
+    tools = list(TOOL_DEFS)
+    if indexer.tool_module:
+        tools.extend(indexer.tool_module.get_tool_defs())
 
     messages = [{"role": "user", "content": task.prompt}]
 
@@ -478,9 +580,12 @@ def run_task(
         while turns < task.max_turns:
             turns += 1
 
+            # Truncate old tool results if context is getting large
+            cur_messages = _truncate_messages(messages)
+
             # Nudge agent to wrap up near the end
-            cur_messages = list(messages)
             if turns >= task.max_turns - 1:
+                cur_messages = list(cur_messages)
                 cur_messages.append({
                     "role": "user",
                     "content": (
@@ -490,7 +595,7 @@ def run_task(
                     ),
                 })
 
-            # Retry with exponential backoff on rate limits
+            # Retry with exponential backoff + jitter on rate limits
             response = None
             for attempt in range(5):
                 try:
@@ -498,14 +603,19 @@ def run_task(
                         model=model,
                         max_tokens=4096,
                         system=system,
-                        tools=TOOL_DEFS,
+                        tools=tools,
                         messages=cur_messages,
+                        temperature=temperature,
                     )
                     break
-                except RuntimeError as e:
-                    if "429" in str(e) and attempt < 4:
-                        wait = 2 ** attempt * 5
-                        print(f"\n         Rate limited, waiting {wait}s...", end="", flush=True)
+                except Exception as e:
+                    is_rate_limit = (
+                        (isinstance(e, RuntimeError) and "429" in str(e)) or
+                        (_anthropic_mod and isinstance(e, _anthropic_mod.RateLimitError))
+                    )
+                    if is_rate_limit and attempt < 4:
+                        wait = 2 ** attempt * 5 * random.uniform(0.8, 1.5)
+                        print(f"\n         Rate limited, waiting {wait:.0f}s...", end="", flush=True)
                         time.sleep(wait)
                     else:
                         raise
@@ -540,7 +650,7 @@ def run_task(
                     })
                 else:
                     t0 = time.monotonic()
-                    result_text = execute_tool(tu.name, tu.input, workspace)
+                    result_text = execute_tool(tu.name, tu.input, workspace, indexer)
                     dt = int((time.monotonic() - t0) * 1000)
 
                     tool_calls.append(ToolCall(
@@ -602,18 +712,37 @@ def run_task(
 # ---------------------------------------------------------------------------
 
 def setup_indexer(indexer: Indexer, workspace: str):
-    if not indexer.setup_command:
-        return
-    print(f"  Setting up '{indexer.name}'...")
-    cmd = indexer.setup_command.replace("{workspace}", workspace)
-    result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True,
-        timeout=120, cwd=workspace,
-    )
-    if result.returncode != 0:
-        print(f"  Warning: setup failed: {result.stderr[:500]}")
-    else:
-        print(f"  Done. {result.stdout.strip()}")
+    if indexer.setup_command:
+        print(f"  Setting up '{indexer.name}'...")
+        cmd = indexer.setup_command.replace("{workspace}", workspace)
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=120, cwd=workspace,
+        )
+        if result.returncode != 0:
+            print(f"  Warning: setup failed: {result.stderr[:500]}")
+        else:
+            print(f"  Done. {result.stdout.strip()}")
+
+    if indexer.tool_module_path:
+        print(f"  Loading tool module for '{indexer.name}'...")
+        # Resolve relative to script dir
+        script_dir = Path(__file__).resolve().parent
+        mod_path = script_dir / indexer.tool_module_path
+        spec = importlib.util.spec_from_file_location(
+            f"tool_module_{indexer.name}", str(mod_path),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        indexer.tool_module = mod
+
+        t0 = time.monotonic()
+        indexer.tool_context = mod.setup(workspace, indexer.tool_config)
+        dt = time.monotonic() - t0
+        print(f"  Tool module loaded in {dt:.1f}s")
+
+        # Cache the tool names this module provides
+        indexer.tool_names = {td["name"] for td in mod.get_tool_defs()}
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +781,22 @@ def result_to_dict(r: RunResult) -> dict:
 # Reporting
 # ---------------------------------------------------------------------------
 
+def _stddev(values):
+    """Population standard deviation."""
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
+
+
+def _per_run_correct(runs, tasks):
+    """Group runs by run_number and return per-run correct counts."""
+    by_run = defaultdict(list)
+    for r in runs:
+        by_run[r["run_number"]].append(r)
+    return [sum(1 for r in by_run[k] if r["correct"]) for k in sorted(by_run)]
+
+
 def print_summary(results: list, indexer_names: list):
     by_indexer = defaultdict(list)
     for r in results:
@@ -661,51 +806,81 @@ def print_summary(results: list, indexer_names: list):
     if not names:
         return
 
+    # Check if we have multiple runs per task (for variance display)
+    run_numbers = {r["run_number"] for r in results}
+    multi_run = len(run_numbers) > 1
+
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
 
-    col_w = 22
+    col_w = 22 if not multi_run else 30
     header = f"{'Metric':<28}" + "".join(f"{n:>{col_w}}" for n in names)
     print(header)
     print("-" * len(header))
 
+    def _fmt_with_stddev(val, values, is_pct=False):
+        """Format a value, appending ±stddev when multi-run and stddev > 0."""
+        sd = _stddev(values) if multi_run else 0.0
+        if is_pct:
+            if sd > 0:
+                return f"{val:.0f}% ±{sd:.0f}"
+            return f"{val:.0f}%"
+        if sd > 0:
+            return f"{val:,.0f} ±{sd:,.0f}"
+        return f"{val:,.0f}"
+
+    # Collect task IDs for per-run accuracy breakdown
+    task_ids = list(dict.fromkeys(r["task_id"] for r in results))
+
     metrics = [
-        ("Avg total tokens", lambda runs: sum(r["total_tokens"] for r in runs) / len(runs)),
-        ("Avg input tokens", lambda runs: sum(r["input_tokens"] for r in runs) / len(runs)),
-        ("Avg output tokens", lambda runs: sum(r["output_tokens"] for r in runs) / len(runs)),
-        ("Avg peak context", lambda runs: sum(r.get("peak_input_tokens", 0) for r in runs) / len(runs)),
-        ("Avg tool calls", lambda runs: sum(r["tool_call_count"] for r in runs) / len(runs)),
-        ("Avg turns", lambda runs: sum(r["turns"] for r in runs) / len(runs)),
-        ("Avg wall time (ms)", lambda runs: sum(r["wall_time_ms"] for r in runs) / len(runs)),
-        ("Accuracy (%)", lambda runs: sum(1 for r in runs if r["correct"]) / len(runs) * 100),
+        ("Avg total tokens", lambda runs: [r["total_tokens"] for r in runs]),
+        ("Avg input tokens", lambda runs: [r["input_tokens"] for r in runs]),
+        ("Avg output tokens", lambda runs: [r["output_tokens"] for r in runs]),
+        ("Avg peak context", lambda runs: [r.get("peak_input_tokens", 0) for r in runs]),
+        ("Avg tool calls", lambda runs: [r["tool_call_count"] for r in runs]),
+        ("Avg turns", lambda runs: [r["turns"] for r in runs]),
+        ("Avg wall time (ms)", lambda runs: [r["wall_time_ms"] for r in runs]),
     ]
 
     baseline_vals = {}
-    for label, fn in metrics:
+    for label, values_fn in metrics:
         row = f"{label:<28}"
         for i, name in enumerate(names):
-            val = fn(by_indexer[name])
+            values = values_fn(by_indexer[name])
+            val = sum(values) / len(values)
             if i == 0:
                 baseline_vals[label] = val
-            if label == "Accuracy (%)":
-                row += f"{val:>{col_w - 1}.0f}%"
+            base = baseline_vals[label]
+            formatted = _fmt_with_stddev(val, values)
+            if i > 0 and base > 0:
+                delta_pct = (val - base) / base * 100
+                sign = "+" if delta_pct >= 0 else ""
+                row += f"{formatted + ' (' + sign + f'{delta_pct:.0f}%)':>{col_w}}"
             else:
-                base = baseline_vals[label]
-                if i > 0 and base > 0:
-                    delta_pct = (val - base) / base * 100
-                    sign = "+" if delta_pct >= 0 else ""
-                    row += f"{val:>{col_w - 8},.0f} ({sign}{delta_pct:.0f}%)"
-                else:
-                    row += f"{val:>{col_w},.0f}"
+                row += f"{formatted:>{col_w}}"
         print(row)
+
+    # Accuracy row with per-run breakdown
+    label = "Accuracy (%)"
+    row = f"{label:<28}"
+    for i, name in enumerate(names):
+        runs = by_indexer[name]
+        val = sum(1 for r in runs if r["correct"]) / len(runs) * 100
+        if multi_run:
+            per_run = _per_run_correct(runs, task_ids)
+            breakdown = ",".join(str(c) for c in per_run)
+            formatted = f"{val:.0f}% ({breakdown})"
+        else:
+            formatted = f"{val:.0f}%"
+        row += f"{formatted:>{col_w}}"
+    print(row)
 
     # Per-task breakdown
     print(f"\n{'Task':<28}" + "".join(f"{'calls':>8}{'tok':>8}{'ok':>6}" for _ in names))
     print(f"{'':28}" + "".join(f"{n:>22}" for n in names))
     print("-" * (28 + 22 * len(names)))
 
-    task_ids = list(dict.fromkeys(r["task_id"] for r in results))
     for tid in task_ids:
         row = f"{tid:<28}"
         for name in names:
@@ -734,6 +909,8 @@ def main():
     parser.add_argument("--output", default="results", help="Output directory for results")
     parser.add_argument("--task-id", help="Run only this task ID")
     parser.add_argument("--indexer-name", help="Run only this indexer")
+    parser.add_argument("--temperature", type=float, default=0.3, help="Sampling temperature (0.3 default balances consistency and variance)")
+    parser.add_argument("--parallel", type=int, default=1, help="Max parallel runs (default 1, recommend 3-4)")
     parser.add_argument("--results", help="Path to results.json (report only, no run)")
     args = parser.parse_args()
 
@@ -771,43 +948,75 @@ def main():
     total_runs = len(tasks) * len(indexers) * args.runs
     print(f"Eval: {len(tasks)} tasks x {len(indexers)} indexers x {args.runs} runs = {total_runs} runs")
     print(f"Model: {model}")
+    print(f"Temperature: {args.temperature}")
+    print(f"Parallel: {args.parallel}")
     print(f"Workspace: {args.workspace}\n")
 
     for indexer in indexers:
         setup_indexer(indexer, args.workspace)
 
+    # Build flat job list and indexer lookup
+    indexer_map = {i.name: i for i in indexers}
+    jobs = [
+        (task, indexer, run_num)
+        for task in tasks
+        for indexer in indexers
+        for run_num in range(1, args.runs + 1)
+    ]
+
     all_results = []
     output_dir = Path(args.output) if Path(args.output).is_absolute() else script_dir / args.output
     os.makedirs(output_dir, exist_ok=True)
 
-    for task in tasks:
-        for indexer in indexers:
-            for run_num in range(1, args.runs + 1):
-                label = f"[{indexer.name:>12}] {task.id:<28} run {run_num}/{args.runs}"
-                print(f"  {label}", end="  ", flush=True)
-
-                result = run_task(client, task, indexer, args.workspace, model, run_num)
-                rd = result_to_dict(result)
-                all_results.append(rd)
-
-                status = "PASS" if result.correct else "FAIL"
-                n_tools = len(result.tool_calls)
-                tok = result.input_tokens + result.output_tokens
-                print(f"{status}  {result.turns}turns  {n_tools}calls  {tok:,}tok  {result.wall_time_ms:,}ms")
-
-                if result.error:
-                    print(f"         Error: {result.error}")
-
-    # Save results
     ts = time.strftime("%Y%m%d-%H%M%S")
     results_file = output_dir / f"results-{ts}.json"
-    with open(results_file, "w") as f:
-        json.dump(all_results, f, indent=2)
-    print(f"\nResults saved to {results_file}")
-
     latest = output_dir / "results-latest.json"
-    with open(latest, "w") as f:
-        json.dump(all_results, f, indent=2)
+
+    print_lock = threading.Lock()
+    completed = [0]  # mutable counter for closure
+
+    def _save_incremental():
+        """Save current results to disk (caller must not hold print_lock)."""
+        with open(results_file, "w") as f:
+            json.dump(all_results, f, indent=2)
+        with open(latest, "w") as f:
+            json.dump(all_results, f, indent=2)
+
+    def _run_job(job):
+        task, indexer, run_num = job
+        result = run_task(client, task, indexer, args.workspace, model, run_num, args.temperature)
+        rd = result_to_dict(result)
+
+        with print_lock:
+            completed[0] += 1
+            n = completed[0]
+            status = "PASS" if result.correct else "FAIL"
+            n_tools = len(result.tool_calls)
+            tok = result.input_tokens + result.output_tokens
+            label = f"[{n}/{total_runs}] [{indexer.name:>12}] {task.id:<28} run {run_num}/{args.runs}"
+            print(f"  {label}  {status}  {result.turns}turns  {n_tools}calls  {tok:,}tok  {result.wall_time_ms:,}ms")
+            if result.error:
+                print(f"         Error: {result.error}")
+            all_results.append(rd)
+            _save_incremental()
+
+        return rd
+
+    if args.parallel <= 1:
+        # Sequential mode — no thread overhead
+        for job in jobs:
+            _run_job(job)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
+            futures = [pool.submit(_run_job, job) for job in jobs]
+            # Wait for all; exceptions propagate on .result()
+            for fut in concurrent.futures.as_completed(futures):
+                fut.result()
+
+    # Sort results for deterministic output order
+    all_results.sort(key=lambda r: (r["task_id"], r["indexer"], r["run_number"]))
+    _save_incremental()
+    print(f"\nResults saved to {results_file}")
 
     indexer_names = [i.name for i in indexers]
     print_summary(all_results, indexer_names)

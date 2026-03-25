@@ -1,0 +1,149 @@
+tasks:
+  # --- Navigate tasks (replacing shallow struct-find tasks) ---
+
+  - id: error_provenance
+    level: 1
+    category: navigate
+    description: "Find where BlockError::DuplicateFullyImported is defined and constructed"
+    prompt: >
+      Find where the BlockError::DuplicateFullyImported error variant is defined
+      in Lighthouse. Then find all locations where this error is constructed
+      (returned). Give file paths, line numbers, and the function that returns it.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "block_verification.rs"
+        - "DuplicateFullyImported"
+        - "new_without_slasher_checks"
+
+  - id: test_coverage
+    level: 1
+    category: navigate
+    description: "Find tests that exercise block import"
+    prompt: >
+      Find the test functions that exercise process_block or import_block in
+      Lighthouse's beacon_chain. List at least 3 test function names with their
+      file paths and line numbers.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "block_verification.rs"
+        - "chain_segment"
+
+  - id: cross_crate_type
+    level: 1
+    category: navigate
+    description: "Find PayloadVerificationStatus definition and usage across crates"
+    prompt: >
+      Find the PayloadVerificationStatus enum in Lighthouse. Where is it defined?
+      What are its variants? List which crates and files import or use it.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "PayloadVerificationStatus"
+        - "Optimistic"
+        - "execution_payload"
+
+  - id: config_flag_trace
+    level: 1
+    category: navigate
+    description: "Trace --reconstruct-historic-states CLI flag to behavior"
+    prompt: >
+      Trace the --reconstruct-historic-states (or --archive) CLI flag in Lighthouse
+      from where it is defined as an argument, through config parsing, to where it
+      triggers actual behavior. List each step with file path, line number, and
+      function name.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "archive"
+        - "reconstruct"
+        - "chain_config"
+
+  # --- Comprehend tasks (tightened verification) ---
+
+  - id: block_import_flow
+    level: 2
+    category: comprehend
+    description: "Trace the block import flow"
+    prompt: >
+      Trace the block import flow in Lighthouse: starting from when a block arrives
+      via gossip or RPC, through validation, to when it is stored. Identify the key
+      functions/methods involved and their file locations. Be specific about file paths
+      and line numbers.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "process_block"
+        - "import_block"
+        - "beacon_chain.rs"
+
+  - id: attestation_verify
+    level: 2
+    category: comprehend
+    description: "Explain attestation verification"
+    prompt: >
+      How does Lighthouse verify attestations? Find the main attestation verification
+      entry point(s), what checks are performed, and where the code lives.
+      Include specific file paths and function names.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "attestation_verification"
+        - "verify_unaggregated_attestation"
+
+  - id: peer_disconnect
+    level: 2
+    category: comprehend
+    description: "Understand peer disconnection handling"
+    prompt: >
+      How does PeerManager handle peer disconnections in Lighthouse?
+      Find the relevant structs, methods, and explain what happens when a peer
+      disconnects. Include file paths and line numbers.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "PeerManager"
+        - "disconnect"
+
+  # --- Impact tasks (unchanged) ---
+
+  - id: caller_reachability
+    level: 3
+    category: impact
+    description: "Trace callers of verify_proposer_slashing to entry points"
+    prompt: >
+      What functions call verify_proposer_slashing in Lighthouse? For each caller,
+      trace back to the entry point (HTTP handler, gossip handler, or RPC handler).
+      List each complete call chain from entry point to verify_proposer_slashing,
+      with file paths for every function in the chain.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "verify_proposer_slashing"
+        - "process_proposer_slashing"
+
+  - id: shared_state
+    level: 3
+    category: impact
+    description: "Shared state analysis for block import"
+    prompt: >
+      Analyze the shared mutable state accessed by process_block or import_block
+      in Lighthouse's beacon_chain. For each piece of shared state (behind Arc,
+      Mutex, RwLock, or similar), identify: (1) the state variable/field name,
+      (2) its type, (3) other functions that read or write it. Focus on
+      identifying potential concurrency concerns.
+    max_turns: 10
+    verify:
+      type: contains_all
+      values:
+        - "canonical_head"
+        - "RwLock"

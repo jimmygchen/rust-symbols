@@ -1,27 +1,61 @@
 name: knowledge-graph
 setup_command: null
+tool_module: tool_modules/kg_tool.py
+tool_config:
+  kg_script: /home/claude/lighthouse-workspace/lighthouse-kg/.claude/skills/kg-query/scripts/kg_query.py
+  kg_data: /home/claude/lighthouse-workspace/lighthouse-kg/data/knowledge-graph.jsonl
 system_prompt_extra: |
-  A structural knowledge graph of the Lighthouse codebase is available. Query it via bash:
-    # NOTE: Set KG_QUERY_SCRIPT and KG_DATA_PATH env vars before running
-    python3 ${KG_QUERY_SCRIPT} \
-      --kg ${KG_DATA_PATH} \
-      --log /dev/null <command> <arg>
+  A structural knowledge graph of the Lighthouse codebase is available via the kg_query tool.
+
+  COMMANDS (pass as the "command" parameter):
+
+  Per-function (argument = function name):
+  - function-info: Full profile (callers + callees + guards + effects + reads + writes)
+  - callers: Functions that call the target
+  - callees: Functions called by the target
+  - reads: State/locations read by the target
+  - writes: State/locations written by the target
+  - shared-state: Locations accessed by BOTH the target AND other functions (concurrency analysis)
+  - guards: Error/nil/auth checks in the target
+  - effects: Side effects (panics, spawns, external calls)
+
+  By file (argument = repo-relative path):
+  - file-functions: All functions defined in a file
+
+  Transitive analysis:
+  - downstream <fn>: ALL functions transitively called by the target
+  - upstream <fn>: ALL functions that transitively call the target
+  - path (argument = "fn1->fn2"): Shortest call path between two functions
+  - dependents (argument = module/crate name): All functions that depend on a crate/module/file
+
+  Global search (argument = search term):
+  - search-functions: Search all functions by name
+  - search-effects: Search all effects by kind or symbol (e.g., "unwrap", "Spawn")
+  - search-guards: Search all guards by kind or predicate (e.g., "NullCheck")
+  - search-locations: Search all state/variables by name, type, or "shared" filter
+  - stats (argument = "_"): Summary statistics about the graph
+
+  FUNCTION RESOLUTION:
+  The argument is matched against function names:
+  1. Exact ID match (full qualified name)
+  2. Exact short name match (e.g., "process_block")
+  3. Substring match, case-insensitive (e.g., "process" matches "process_block")
+  If multiple functions match, results include all of them.
+
+  OUTPUT FORMAT:
+  JSON with envelope: query, argument, matched_functions, result_count, results[].
+  Key result fields by command type:
+  - callers/callees/search-functions: {id, name, file, line, line_end, entrypoint_kind}
+  - reads/writes/search-locations: {id, name, file, line, location_kind, type_string, shared}
+  - effects/search-effects: {effect_kind, target_symbol, source_span: {file, line}, parent_function}
+  - guards/search-guards: {guard_kind, predicate_expr, source_span: {file, line}, parent_function}
+  - downstream/upstream/dependents: adds "depth" field
 
   USAGE RULES:
-  - Start with focused queries (callers, callees, function-info) before broad ones (downstream, upstream)
+  - Start with function-info to get a complete profile, then drill into specifics
+  - Use shared-state to find concurrency risks — shows locations your target accesses AND other functions also read/write
+  - Use search-locations with "shared" filter to directly find all shared state
+  - Use callers to understand trust boundaries — are callers internal or exposed to external input?
   - For large result sets, use search-functions with specific names rather than broad substrings
-  - Output is JSON; pipe through 'python3 -c "import sys,json; [print(r[\"name\"],r[\"file\"]) for r in json.load(sys.stdin)[\"results\"]]"' to extract key fields
   - After finding relationships via KG, read the actual source to understand context
-
-  Key commands:
-  - function-info <fn>: Full profile (callers + callees + effects + guards + reads + writes)
-  - callers <fn> / callees <fn>: Direct call relationships
-  - shared-state <fn>: State shared with other functions (concurrency analysis)
-  - effects <fn>: Panics, spawns, unsafe ops
-  - guards <fn>: Error/nil checks
-  - downstream <fn> / upstream <fn>: Transitive call chains (can be large — prefer focused queries)
-  - path "fn1->fn2": Shortest call path between two functions
-  - search-effects <term>: Search all effects (e.g., "unwrap", "Spawn")
-  - search-functions <term>: Search functions by name
-  - file-functions <path>: All functions in a file (repo-relative path)
 files: []

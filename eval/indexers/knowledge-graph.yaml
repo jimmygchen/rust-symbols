@@ -1,0 +1,27 @@
+name: knowledge-graph
+setup_command: null
+system_prompt_extra: |
+  A structural knowledge graph of the Lighthouse codebase is available. Query it via bash:
+    # NOTE: Set KG_QUERY_SCRIPT and KG_DATA_PATH env vars before running
+    python3 ${KG_QUERY_SCRIPT} \
+      --kg ${KG_DATA_PATH} \
+      --log /dev/null <command> <arg>
+
+  USAGE RULES:
+  - Start with focused queries (callers, callees, function-info) before broad ones (downstream, upstream)
+  - For large result sets, use search-functions with specific names rather than broad substrings
+  - Output is JSON; pipe through 'python3 -c "import sys,json; [print(r[\"name\"],r[\"file\"]) for r in json.load(sys.stdin)[\"results\"]]"' to extract key fields
+  - After finding relationships via KG, read the actual source to understand context
+
+  Key commands:
+  - function-info <fn>: Full profile (callers + callees + effects + guards + reads + writes)
+  - callers <fn> / callees <fn>: Direct call relationships
+  - shared-state <fn>: State shared with other functions (concurrency analysis)
+  - effects <fn>: Panics, spawns, unsafe ops
+  - guards <fn>: Error/nil checks
+  - downstream <fn> / upstream <fn>: Transitive call chains (can be large — prefer focused queries)
+  - path "fn1->fn2": Shortest call path between two functions
+  - search-effects <term>: Search all effects (e.g., "unwrap", "Spawn")
+  - search-functions <term>: Search functions by name
+  - file-functions <path>: All functions in a file (repo-relative path)
+files: []

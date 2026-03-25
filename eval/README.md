@@ -1,8 +1,9 @@
-# rust-symbols Eval Harness
+# Eval Harness
 
-Measures the effectiveness of code indexers by running navigation and comprehension
-tasks against a codebase using Claude with tool use, comparing token usage,
-tool calls, wall time, and accuracy across pluggable indexer configurations.
+Measures how code-navigation tools affect LLM-assisted development on Lighthouse.
+The goal is to find how tools — individually or together — can reduce context usage,
+token cost, and wall-clock time while improving accuracy across navigation,
+comprehension, and impact analysis tasks.
 
 The harness is language and project agnostic. The included example tasks use
 [Lighthouse](https://github.com/sigp/lighthouse) (a large Rust workspace) as a
@@ -51,12 +52,14 @@ The runner auto-detects credentials:
 eval/
 ├── runner.py          # Main harness (agent loop, tools, reporting)
 ├── tasks/             # Task definitions (YAML)
-│   ├── l1_navigate.yaml    # Symbol lookup tasks (Lighthouse examples)
-│   └── l2_comprehend.yaml  # Cross-file comprehension tasks (Lighthouse examples)
+│   ├── l1_navigate.yaml    # L1: Symbol lookup tasks
+│   ├── l2_comprehend.yaml  # L2: Cross-file comprehension tasks
+│   └── l3_impact.yaml      # L3: Impact analysis tasks (caller reachability, shared state)
 ├── indexers/          # Pluggable indexer configs
-│   ├── baseline.yaml       # No index (control group)
-│   └── rust-symbols.yaml     # rust-symbols tool
-└── results/           # Output (timestamped JSON + latest)
+│   ├── baseline.yaml         # No index (control group)
+│   ├── rust-symbols.yaml     # Flat symbol index
+│   └── knowledge-graph.yaml  # Structural KG (caller/callee, shared-state, effects)
+└── results/           # Output (gitignored: timestamped JSON + reports)
 ```
 
 ## Adding a New Indexer
@@ -89,7 +92,7 @@ Create or edit YAML files in `tasks/`:
 ```yaml
 tasks:
   - id: unique_id
-    level: 1               # 1=navigate, 2=comprehend (informational)
+    level: 1               # 1=navigate, 2=comprehend, 3=impact
     category: navigate
     description: "Short description"
     prompt: >
@@ -100,6 +103,40 @@ tasks:
       values:
         - "string that must appear in answer"
 ```
+
+### Task Levels
+
+| Level | Category | What it tests | Example |
+|-------|----------|---------------|---------|
+| L1 | Navigate | Find a specific struct/method/type | "Find where SyncManager is defined" |
+| L2 | Comprehend | Trace a flow or explain a subsystem | "Trace the block import flow" |
+| L3 | Impact | Analyse call chains, shared state, side effects | "Trace callers of verify_proposer_slashing to entry points" |
+
+L1/L2 tasks test basic tool-assisted navigation. L3 tasks test structural reasoning that
+requires relationship data (call graphs, shared state) beyond what grep can provide.
+
+## Knowledge-Graph Indexer Setup
+
+The `knowledge-graph` indexer requires two env vars pointing to the KG tool:
+
+```bash
+export KG_QUERY_SCRIPT=/path/to/kg_query.py
+export KG_DATA_PATH=/path/to/knowledge-graph.jsonl
+```
+
+The system prompt in `indexers/knowledge-graph.yaml` references `${KG_QUERY_SCRIPT}` and
+`${KG_DATA_PATH}`. These are expanded by bash when the agent runs KG queries.
+
+## Running a Full Comparison
+
+```bash
+# Run each indexer separately (runner accepts one --indexer-name at a time)
+python runner.py --workspace /path/to/lighthouse --indexer-name baseline --runs 1 --model sonnet
+python runner.py --workspace /path/to/lighthouse --indexer-name rust-symbols --runs 1 --model sonnet
+python runner.py --workspace /path/to/lighthouse --indexer-name knowledge-graph --runs 1 --model sonnet
+```
+
+Each run produces a timestamped JSON in `results/`. Use `--runs 3` for variance data.
 
 ## What Gets Measured
 
@@ -129,3 +166,53 @@ Near the turn limit, the agent is prompted to submit its best answer immediately
 - Use `--task-id` and `--indexer-name` to iterate on specific combinations
 - Inspect `results/results-latest.json` for full answers and tool call traces
 - If verification fails but the agent found the right info, loosen the verify values
+
+## Generating a Report
+
+### 1. Run the eval
+
+Run all three indexers as described in "Running a Full Comparison" above.
+
+### 2. Print summary
+
+```bash
+python runner.py --workspace . --results results/results-latest.json
+```
+
+### 3. Manual quality scoring (L3 tasks)
+
+Automated verification (`contains_all`) is coarse — it checks keyword presence, not answer quality.
+For L3 tasks, manually score each answer against ground truth:
+
+| Score | Meaning |
+|-------|---------|
+| 0 | Wrong or no answer |
+| 1 | Partial — found some relevant info but missed key elements |
+| 2 | Mostly correct — identified key items but vague on some details |
+| 3 | Comprehensive — complete with file paths and function names |
+
+To establish ground truth, query the KG and read source code to build the full picture
+(e.g., all callers of a function traced to entry points, all shared state fields with types).
+
+### 4. Compile the report
+
+Structure:
+
+```
+Goal            — What we're improving (context, tokens, time, accuracy)
+Exec Summary    — Headline metrics table (baseline vs tools), key findings
+Methodology     — Harness, tools under test, task table, known limitations
+Results         — By-level table, per-task table, tool patterns, tool overhead
+                  (all with baseline comparison)
+Analysis        — Failure root causes, efficiency mechanism, capability gaps
+Recommendation  — Goals table vs baseline, when to use which, areas for improvement
+Appendix        — Raw files, ground truth, quality scores, environment
+```
+
+### Reporting principles
+
+- **Always compare against baseline** — all deltas relative to no-tool
+- **Show all metrics** — accuracy, tokens, wall time, tool calls; no single metric tells the full story
+- **Include per-task data** — averages hide important differences
+- **Explain the mechanism** — not just "fewer tokens" but *why* (output density, query overhead)
+- **Document limitations** — N, cold-load overhead, output caps, snapshot freshness
